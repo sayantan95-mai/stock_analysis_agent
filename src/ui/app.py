@@ -1,8 +1,12 @@
+"""
+Streamlit UI for the Stock Analysis Multi-Agent System.
+
+Run: uv run streamlit run src/ui/app.py
+"""
 import streamlit as st
-import os
 from pathlib import Path
 
-# Fix for loop errors in some environments
+# Fix for async loop errors in some environments
 import asyncio
 try:
     asyncio.get_running_loop()
@@ -11,11 +15,31 @@ except RuntimeError:
 
 from src.agents.orchestrator import OrchestratorAgent
 
+# ──────────────────────────────────────────────
 # Page Config
+# ──────────────────────────────────────────────
 st.set_page_config(page_title="AI Stock Analyst", page_icon="📈", layout="wide")
 
-def save_uploaded_file(uploaded_file):
-    """Helper to save uploaded PDF to disk."""
+
+# ──────────────────────────────────────────────
+# Session State Initialization
+# ──────────────────────────────────────────────
+if "orchestrator" not in st.session_state:
+    st.session_state.orchestrator = None
+if "results" not in st.session_state:
+    st.session_state.results = None
+if "company_name" not in st.session_state:
+    st.session_state.company_name = ""
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+
+def save_uploaded_file(uploaded_file) -> str:
+    """Save uploaded PDF to disk and return path."""
     save_dir = Path("data/uploads")
     save_dir.mkdir(parents=True, exist_ok=True)
     file_path = save_dir / uploaded_file.name
@@ -23,25 +47,57 @@ def save_uploaded_file(uploaded_file):
         f.write(uploaded_file.getbuffer())
     return str(file_path)
 
-# --- Sidebar: Inputs ---
+
+def safe_progress(score: int) -> float:
+    """Safely convert score (0-10) to progress value (0.0-1.0)."""
+    if score is None or score <= 0:
+        return 0.01  # show a sliver instead of empty
+    return min(score / 10, 1.0)
+
+
+# ──────────────────────────────────────────────
+# Sidebar: Inputs
+# ──────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Configuration")
     company_name = st.text_input("Company Name", "Reliance Industries")
-    uploaded_files = st.file_uploader(
-        "Upload Annual Reports (PDF)", 
-        type="pdf", 
-        accept_multiple_files=True
-    )
-    
-    start_btn = st.button("🚀 Run Analysis", type="primary")
 
-# --- Main Area ---
+    uploaded_files = st.file_uploader(
+        "Upload Annual Reports (PDF)",
+        type="pdf",
+        accept_multiple_files=True,
+    )
+
+    start_btn = st.button("🚀 Run Analysis", type="primary", use_container_width=True)
+
+    # Show previous analysis info
+    if st.session_state.results:
+        st.divider()
+        st.caption(f"Last analysis: **{st.session_state.company_name}**")
+        if st.button("🗑️ Clear Results"):
+            st.session_state.results = None
+            st.session_state.orchestrator = None
+            st.session_state.chat_history = []
+            st.rerun()
+
+
+# ──────────────────────────────────────────────
+# Main Area
+# ──────────────────────────────────────────────
 st.title("📈 AI Financial Analyst Agent")
 st.markdown("Your autonomous team for stock research, document analysis, and investment advice.")
 
+
+# ──────────────────────────────────────────────
+# Run Analysis
+# ──────────────────────────────────────────────
 if start_btn and company_name:
+    # Create fresh orchestrator for new analysis
     orchestrator = OrchestratorAgent()
-    
+    st.session_state.orchestrator = orchestrator
+    st.session_state.company_name = company_name
+    st.session_state.chat_history = []
+
     # 1. Handle File Uploads
     pdf_paths = []
     if uploaded_files:
@@ -52,88 +108,190 @@ if start_btn and company_name:
                 st.write(f"✅ Saved {file.name}")
 
     # 2. Run Analysis Pipeline
-    with st.status("🤖 AI Agents at work...", expanded=True) as status:
-        st.write("🔍 Research Agent: Fetching market data & news...")
-        results = orchestrator.run_analysis(company_name, pdf_paths)
-        status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
+    try:
+        with st.status("🤖 AI Agents at work...", expanded=True) as status:
+            st.write("🔍 Research Agent: Fetching market data & news...")
+            results = orchestrator.run_analysis(company_name, pdf_paths)
+            status.update(label="✅ Analysis Complete!", state="complete", expanded=False)
 
-    # 3. Display Results
+        st.session_state.results = results
+
+    except Exception as e:
+        st.error(f"❌ Analysis failed: {e}")
+        st.info("Check your API keys in `.env` and try again.")
+        st.stop()
+
+
+# ──────────────────────────────────────────────
+# Display Results (from session state)
+# ──────────────────────────────────────────────
+if st.session_state.results:
+    results = st.session_state.results
     rec = results["recommendation"]
     data = results["market_data"]
     report = results["analysis_report"]
 
-    # --- Top Banner: Verdict ---
+    # ── Top Banner: Verdict ──
     st.divider()
     col1, col2, col3 = st.columns([1, 2, 1])
-    
+
     color_map = {"BUY": "green", "SELL": "red", "HOLD": "orange"}
-    color = color_map.get(rec.verdict, "blue")
-    
+    verdict_str = rec.verdict.value if hasattr(rec.verdict, "value") else str(rec.verdict)
+    color = color_map.get(verdict_str, "blue")
+
     with col1:
-        st.markdown(f"## Verdict: :{color}[{rec.verdict}]")
+        st.markdown(f"## Verdict: :{color}[{verdict_str}]")
     with col2:
-        st.metric("Target Entry Price", f"₹{rec.suggested_entry_price}")
+        st.metric("Target Entry Price", f"₹{rec.suggested_entry_price:,.2f}")
     with col3:
         st.metric("Risk Score", f"{rec.risk_score}/10")
 
-    # --- Tabs for Details ---
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Financial Health", "📰 Market Research", "💡 Deep Dive", "💬 Chat with Data"])
+    # ── Tabs ──
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Financial Health",
+        "📰 Market Research",
+        "💡 Deep Dive",
+        "💬 Chat with Data",
+    ])
 
+    # ── Tab 1: Financial Health Scorecard ──
     with tab1:
         st.subheader("Financial Health Scorecard")
         score = report.score_card
-        
-        # Display Progress Bars for Scores
+
+        overall = score.overall_score or score.calculate_overall()
+        st.metric("Overall Score", f"{overall}/10")
+
         c1, c2 = st.columns(2)
         with c1:
             st.write("**Revenue Growth**")
-            st.progress(score.revenue_growth / 10)
+            st.progress(safe_progress(score.revenue_growth), text=f"{score.revenue_growth}/10")
             st.write("**Profit Margins**")
-            st.progress(score.profit_margin / 10)
+            st.progress(safe_progress(score.profit_margin), text=f"{score.profit_margin}/10")
             st.write("**Cash Flow**")
-            st.progress(score.cash_flow / 10)
+            st.progress(safe_progress(score.cash_flow), text=f"{score.cash_flow}/10")
         with c2:
             st.write("**Debt Health**")
-            st.progress(score.debt_health / 10)
+            st.progress(safe_progress(score.debt_health), text=f"{score.debt_health}/10")
             st.write("**ROE / ROCE**")
-            st.progress(score.return_ratios / 10)
+            st.progress(safe_progress(score.return_ratios), text=f"{score.return_ratios}/10")
             st.write("**Earnings Consistency**")
-            st.progress(score.earnings_consistency / 10)
-        
-        st.info(f"**Analyst Note:** {report.revenue_trend} | {report.debt_analysis}")
+            st.progress(safe_progress(score.earnings_consistency), text=f"{score.earnings_consistency}/10")
 
+        st.info(f"**Analyst Note:** {report.revenue_trend}")
+        if report.debt_analysis:
+            st.info(f"**Debt Analysis:** {report.debt_analysis}")
+
+        # Strengths & Weaknesses
+        s1, s2 = st.columns(2)
+        with s1:
+            st.subheader("💪 Strengths")
+            for s in report.strengths:
+                st.markdown(f"- {s}")
+        with s2:
+            st.subheader("⚠️ Weaknesses")
+            for w in report.weaknesses:
+                st.markdown(f"- {w}")
+
+    # ── Tab 2: Market Research ──
     with tab2:
         st.subheader("Live Market Data")
         m = data.fundamentals
-        
-        # Metrics Row
-        rm1, rm2, rm3, rm4 = st.columns(4)
-        rm1.metric("P/E Ratio", m.pe_ratio)
-        rm2.metric("Market Cap", f"₹{m.market_cap} Cr")
-        rm3.metric("ROE", f"{m.roe}%")
-        rm4.metric("Debt/Equity", m.debt_to_equity)
-        
-        st.subheader("News Sentiment")
-        st.warning(data.news_sentiment_summary)
-        
-        st.subheader("Recent Headlines")
-        for news in data.news:
-            st.markdown(f"- [{news.title}]({news.url})")
+        p = data.price
 
+        # Price Row
+        pc1, pc2, pc3 = st.columns(3)
+        pc1.metric("Current Price", f"₹{p.current_price:,.2f}")
+        pc2.metric("Day Range", f"₹{p.day_low:,.0f} - ₹{p.day_high:,.0f}")
+        pc3.metric("52-Week Range", f"₹{p.week_52_low:,.0f} - ₹{p.week_52_high:,.0f}")
+
+        # Fundamentals Row
+        rm1, rm2, rm3, rm4 = st.columns(4)
+        rm1.metric("P/E Ratio", f"{m.pe_ratio:.1f}")
+        rm2.metric("Market Cap", f"₹{m.market_cap:,.0f} Cr")
+        rm3.metric("ROE", f"{m.roe:.1f}%")
+        rm4.metric("Debt/Equity", f"{m.debt_to_equity:.2f}")
+
+        st.subheader("News Sentiment")
+        st.warning(data.news_sentiment_summary or "No sentiment data available")
+
+        st.subheader("Recent Headlines")
+        if data.news:
+            for news in data.news:
+                st.markdown(f"- [{news.title}]({news.url})")
+        else:
+            st.caption("No recent news found.")
+
+    # ── Tab 3: Deep Dive ──
     with tab3:
         st.subheader("Investment Thesis")
-        st.success(f"**Bull Case:** {rec.bull_case}")
-        st.error(f"**Bear Case:** {rec.bear_case}")
-        
-        st.markdown("### 📝 Detailed Reasoning")
-        st.write(rec.reasoning)
+        if rec.bull_case:
+            st.success(f"**Bull Case:** {rec.bull_case}")
+        if rec.bear_case:
+            st.error(f"**Bear Case:** {rec.bear_case}")
 
+        if rec.key_catalysts:
+            st.subheader("🚀 Key Catalysts")
+            for catalyst in rec.key_catalysts:
+                st.markdown(f"- {catalyst}")
+
+        st.markdown("### 📝 Detailed Reasoning")
+        st.write(rec.reasoning or "No detailed reasoning provided.")
+
+    # ── Tab 4: Chat with Data ──
     with tab4:
         st.subheader("Ask the Document Agent")
-        st.markdown("Ask specific questions about the uploaded annual reports.")
-        
-        user_query = st.text_input("Ask a question about the reports:")
-        if user_query:
-            with st.spinner("Searching documents..."):
-                answer = orchestrator.document_agent.ask(company_name, user_query)
-                st.markdown(f"**Answer:** {answer}")
+
+        if not st.session_state.orchestrator or not st.session_state.orchestrator.document_agent.has_documents(
+            st.session_state.company_name
+        ):
+            st.info("📤 Upload annual reports in the sidebar to enable document Q&A.")
+        else:
+            st.markdown("Ask specific questions about the uploaded annual reports.")
+
+            # Display chat history
+            for entry in st.session_state.chat_history:
+                with st.chat_message("user"):
+                    st.write(entry["question"])
+                with st.chat_message("assistant"):
+                    st.write(entry["answer"])
+
+            # Chat input
+            user_query = st.chat_input("Ask about the reports...")
+            if user_query:
+                with st.chat_message("user"):
+                    st.write(user_query)
+
+                with st.chat_message("assistant"):
+                    with st.spinner("Searching documents..."):
+                        answer = st.session_state.orchestrator.document_agent.ask(
+                            st.session_state.company_name, user_query
+                        )
+                        st.write(answer)
+
+                # Save to history
+                st.session_state.chat_history.append({
+                    "question": user_query,
+                    "answer": answer,
+                })
+
+    # ── Disclaimer (always visible) ──
+    st.divider()
+    st.caption(
+        "⚠️ **Disclaimer:** This tool is for educational and informational purposes only. "
+        "It does not constitute financial advice. Always consult a qualified financial "
+        "advisor before making investment decisions."
+    )
+
+else:
+    # ── Landing State ──
+    st.info("👈 Enter a company name and click **Run Analysis** to get started.")
+    st.markdown(
+        """
+        **What this tool does:**
+        1. 🔍 Fetches live stock data and recent news
+        2. 📄 Analyses uploaded financial reports (optional)
+        3. 📊 Generates a financial health scorecard
+        4. 💡 Provides a Buy/Sell/Hold recommendation
+        """
+    )
