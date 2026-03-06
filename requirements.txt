@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────
+# Stock Analysis Multi-Agent System
+# Dependencies
+# ──────────────────────────────────────────────
+# Install: uv pip install -r requirements.txt
+# Or:      pip install -r requirements.txt
+# ──────────────────────────────────────────────
+
+# --- Agent Framework ---
+google-adk>=0.5.0
+google-genai>=1.0.0
+
+# --- Stock Market Data ---
+yfinance>=0.2.40
+
+# --- Web Search ---
+tavily-python>=0.5.0
+ddgs>=6.0.0
+
+# --- PDF Parsing ---
+pdfplumber>=0.11.0
+PyMuPDF>=1.24.0
+
+# --- RAG Pipeline ---
+chromadb>=0.5.0
+langchain-text-splitters>=0.2.0
+
+# --- Data Processing ---
+pandas>=2.2.0
+
+# --- UI ---
+streamlit>=1.37.0
+
+# --- Config & Utilities ---
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-dotenv>=1.0.0
+rich>=13.7.0
+
+# --- Dev (optional) ---
+# pytest>=8.2.0
+# pytest-asyncio>=0.23.0
+# ruff>=0.5.0
