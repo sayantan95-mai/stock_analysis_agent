@@ -2,6 +2,7 @@
 RAG pipeline — orchestrates ingestion (PDF → chunks → vectors)
 and retrieval (query → relevant chunks → LLM answer).
 """
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -68,15 +69,6 @@ def ingest_document(
     """
     Full ingestion pipeline:
     PDF → Parse → Smart Chunk → Classify → Embed → Store in ChromaDB.
-
-    Args:
-        pdf_path: Path to the PDF file.
-        company: Company name.
-        doc_type: "annual_report" or "quarterly".
-        period: Time period (e.g., "FY2024", "Q3_FY2024").
-
-    Returns:
-        DocumentSummary with stats about what was ingested.
     """
     pdf_path = Path(pdf_path)
 
@@ -157,19 +149,7 @@ def retrieve(
     auto_filter: bool = True,
     period: str | None = None,
 ) -> list[dict]:
-    """
-    Retrieve relevant document chunks for a query.
-
-    Args:
-        company: Company name.
-        query: Natural language question.
-        n_results: How many chunks to return.
-        auto_filter: Auto-detect section filter from query keywords.
-        period: Optional specific period to filter by.
-
-    Returns:
-        List of relevant chunks with content, metadata, and score.
-    """
+    """Retrieve relevant document chunks for a query."""
     section_filter = detect_section(query) if auto_filter else None
 
     return query_chunks(
@@ -186,33 +166,19 @@ def retrieve_multi_query(
     queries: list[str],
     n_per_query: int = 4,
 ) -> list[dict]:
-    """
-    Retrieve chunks for multiple sub-queries and deduplicate.
-    Useful for complex questions that span multiple sections.
-
-    Args:
-        company: Company name.
-        queries: List of sub-queries.
-        n_per_query: Chunks to retrieve per sub-query.
-
-    Returns:
-        Deduplicated list of relevant chunks, sorted by relevance.
-    """
+    """Retrieve chunks for multiple sub-queries and deduplicate."""
     seen_content: set[str] = set()
     all_results: list[dict] = []
 
     for query in queries:
         results = retrieve(company, query, n_results=n_per_query)
         for r in results:
-            # Deduplicate by content hash
             content_key = r["content"][:100]
             if content_key not in seen_content:
                 seen_content.add(content_key)
                 all_results.append(r)
 
-    # Sort by relevance score (highest first)
     all_results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-
     return all_results
 
 
@@ -221,16 +187,7 @@ def retrieve_multi_query(
 # ──────────────────────────────────────────────
 
 def build_context(chunks: list[dict], max_chunks: int = 10) -> str:
-    """
-    Format retrieved chunks into a context string for the LLM.
-
-    Args:
-        chunks: Retrieved chunks from the vector store.
-        max_chunks: Maximum chunks to include.
-
-    Returns:
-        Formatted context string with source references.
-    """
+    """Format retrieved chunks into a context string for the LLM."""
     if not chunks:
         return "No relevant document sections found."
 

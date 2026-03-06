@@ -1,6 +1,7 @@
 """
 Vector store — ChromaDB wrapper for storing and querying document embeddings.
 """
+from __future__ import annotations
 
 import chromadb
 from google import genai
