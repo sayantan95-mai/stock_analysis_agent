@@ -39,6 +39,8 @@ class OrchestratorAgent:
 
         # ── Step 2: Document Processing (RAG) ──
         doc_insights = "No internal financial documents provided."
+        ingestion_results = {"success": [], "failed": []}
+        
         if pdf_files:
             print(f"📂 [Orchestrator] Processing {len(pdf_files)} documents...")
             for pdf_path in pdf_files:
@@ -53,21 +55,36 @@ class OrchestratorAgent:
                         doc_type=doc_type,
                         period=period,
                     )
+                    ingestion_results["success"].append(Path(pdf_path).name)
                 except Exception as e:
-                    print(f"⚠️ [Orchestrator] Failed to ingest {pdf_path}: {e}")
+                    error_msg = str(e)
+                    print(f"⚠️ [Orchestrator] Failed to ingest {pdf_path}: {error_msg}")
+                    ingestion_results["failed"].append({
+                        "file": Path(pdf_path).name,
+                        "error": error_msg[:200]  # Truncate long errors
+                    })
                     continue
 
-            # Ask RAG for a high-level summary to feed the Analyst
-            try:
-                doc_insights = self.document_agent.ask(
-                    company,
-                    "Summarize the key financial risks, revenue growth, profit margins, "
-                    "debt levels, and cash flow from the documents."
-                )
-            except Exception as e:
-                print(f"⚠️ [Orchestrator] Document query failed: {e}")
+            # Report ingestion status
+            if ingestion_results["success"]:
+                print(f"✅ [Orchestrator] Successfully ingested: {ingestion_results['success']}")
+            if ingestion_results["failed"]:
+                print(f"❌ [Orchestrator] Failed to ingest: {[f['file'] for f in ingestion_results['failed']]}")
+
+            # Ask RAG for a high-level summary to feed the Analyst (only if we have docs)
+            if ingestion_results["success"]:
+                try:
+                    doc_insights = self.document_agent.ask(
+                        company,
+                        "Summarize the key financial risks, revenue growth, profit margins, "
+                        "debt levels, and cash flow from the documents."
+                    )
+                except Exception as e:
+                    print(f"⚠️ [Orchestrator] Document query failed: {e}")
+                    doc_insights = "Document ingestion succeeded but query failed."
 
         results["doc_insights"] = doc_insights
+        results["ingestion_results"] = ingestion_results
 
         # ── Step 3: Financial Analysis (Scorecard) ──
         print(f"📊 [Orchestrator] Running financial analysis...")
