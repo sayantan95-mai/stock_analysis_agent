@@ -61,7 +61,8 @@ class DocumentAgent:
         # Thorough check: query the actual vector store
         try:
             # Try to retrieve any chunks for this company
-            chunks = retrieve(company, "company overview financial summary", top_k=1)
+            # FIX: changed 'top_k' to 'n_results' to match retrieve() signature
+            chunks = retrieve(company, "company overview financial summary", n_results=1)
             if chunks:
                 # Found data in vector store, update session tracking
                 self.ingested_companies.add(company_lower)

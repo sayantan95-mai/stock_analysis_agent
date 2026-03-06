@@ -40,7 +40,7 @@ def get_embedding(text: str) -> list[float]:
     client = _get_genai()
     result = client.models.embed_content(
         model=settings.embedding_model,
-        content=text,
+        contents=text,  
     )
     return result.embeddings[0].values
 
@@ -50,7 +50,7 @@ def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     client = _get_genai()
     result = client.models.embed_content(
         model=settings.embedding_model,
-        content=texts,
+        contents=texts, 
     )
     return [e.values for e in result.embeddings]
 
