@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     # --- Gemini (LLM + Embeddings) ---
     google_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-    embedding_model: str = "text-embedding-004"
+    embedding_model: str = "gemini-embedding-001"
     llm_temperature: float = 0.2  # low for factual accuracy
 
     # --- Tavily (Web Search) ---

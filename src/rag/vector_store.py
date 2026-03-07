@@ -3,6 +3,7 @@ Vector store — ChromaDB wrapper for storing and querying document embeddings.
 """
 from __future__ import annotations
 
+import time
 import chromadb
 from google import genai
 
@@ -35,24 +36,74 @@ def _get_genai() -> genai.Client:
 # Embedding
 # ──────────────────────────────────────────────
 
+# Google's BatchEmbedContents API allows at most 100 items per request
+_EMBED_BATCH_LIMIT = 100
+
+# Rate-limit: free tier = 100 requests/min. We pause between batches.
+_BATCH_DELAY_SECONDS = 2        # small delay between every batch
+_RATE_LIMIT_MAX_RETRIES = 5     # max retries on 429 errors
+
+
 def get_embedding(text: str) -> list[float]:
-    """Get embedding vector from Gemini text-embedding-004."""
+    """Get embedding vector from Gemini embedding model."""
     client = _get_genai()
     result = client.models.embed_content(
         model=settings.embedding_model,
-        contents=text,  
+        contents=text,
     )
     return result.embeddings[0].values
 
 
-def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Batch embed multiple texts in one API call (more efficient)."""
+def _embed_batch_with_retry(texts: list[str]) -> list[list[float]]:
+    """Embed a single batch (<=100 texts) with retry on rate-limit errors."""
     client = _get_genai()
-    result = client.models.embed_content(
-        model=settings.embedding_model,
-        contents=texts, 
+
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES):
+        try:
+            result = client.models.embed_content(
+                model=settings.embedding_model,
+                contents=texts,
+            )
+            return [e.values for e in result.embeddings]
+
+        except Exception as e:
+            error_str = str(e)
+            # Check if it's a rate-limit (429) error
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                # Exponential backoff: 30s, 60s, 120s, 120s, 120s
+                wait_time = min(30 * (2 ** attempt), 120)
+                print(f"   ⏳ Rate limited (attempt {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES}). "
+                      f"Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+            else:
+                raise  # Non-rate-limit error, don't retry
+
+    raise RuntimeError(
+        f"Embedding failed after {_RATE_LIMIT_MAX_RETRIES} retries due to rate limiting. "
+        f"Try uploading fewer/smaller documents, or upgrade your Gemini API plan."
     )
-    return [e.values for e in result.embeddings]
+
+
+def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    """Batch embed multiple texts, respecting the 100-per-request API limit
+    and handling rate-limit (429) errors with automatic retry."""
+    all_embeddings: list[list[float]] = []
+    total_batches = (len(texts) + _EMBED_BATCH_LIMIT - 1) // _EMBED_BATCH_LIMIT
+
+    for batch_num, i in enumerate(range(0, len(texts), _EMBED_BATCH_LIMIT), 1):
+        batch = texts[i : i + _EMBED_BATCH_LIMIT]
+
+        if total_batches > 1:
+            print(f"   📦 Embedding batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
+
+        embeddings = _embed_batch_with_retry(batch)
+        all_embeddings.extend(embeddings)
+
+        # Small delay between batches to stay under rate limits
+        if batch_num < total_batches:
+            time.sleep(_BATCH_DELAY_SECONDS)
+
+    return all_embeddings
 
 
 # ──────────────────────────────────────────────
@@ -65,9 +116,7 @@ def _collection_name(company: str) -> str:
     """
     name = company.lower().strip()
     name = name.replace(" ", "-").replace("&", "and")
-    # Keep only allowed characters
     name = "".join(c for c in name if c.isalnum() or c in "._-")
-    # Strip non-alphanumeric from start and end
     name = name.strip("._-")
     if len(name) < 3:
         name = "co-" + name if name else "company"
@@ -90,12 +139,15 @@ def delete_collection(company: str) -> None:
     try:
         chroma.delete_collection(name)
     except ValueError:
-        pass  # collection doesn't exist
+        pass
 
 
 # ──────────────────────────────────────────────
 # Store Chunks
 # ──────────────────────────────────────────────
+
+_CHROMA_BATCH_LIMIT = 100
+
 
 def store_chunks(
     company: str,
@@ -107,28 +159,27 @@ def store_chunks(
     Args:
         company: Company name.
         chunks: List of dicts with "content" and "metadata" keys.
-                metadata must be flat (no nested lists/dicts).
 
     Returns:
         Number of chunks stored.
     """
     collection = get_or_create_collection(company)
 
-    # Batch embed all chunks
+    # Batch embed all chunks (handles >100 and rate limits internally)
     texts = [c["content"] for c in chunks]
     embeddings = get_embeddings_batch(texts)
-
-    ids = []
-    documents = []
-    metadatas = []
 
     base_id = _collection_name(company)
     existing_count = collection.count()
 
+    all_ids = []
+    all_documents = []
+    all_metadatas = []
+
     for i, chunk in enumerate(chunks):
         idx = existing_count + i
-        ids.append(f"{base_id}_{idx}")
-        documents.append(chunk["content"])
+        all_ids.append(f"{base_id}_{idx}")
+        all_documents.append(chunk["content"])
 
         # Flatten metadata — ChromaDB only supports str/int/float/bool
         meta = {}
@@ -137,14 +188,17 @@ def store_chunks(
                 meta[k] = ",".join(str(x) for x in v)
             else:
                 meta[k] = v
-        metadatas.append(meta)
+        all_metadatas.append(meta)
 
-    collection.add(
-        ids=ids,
-        embeddings=embeddings,
-        documents=documents,
-        metadatas=metadatas,
-    )
+    # Add to ChromaDB in batches
+    for i in range(0, len(all_ids), _CHROMA_BATCH_LIMIT):
+        end = i + _CHROMA_BATCH_LIMIT
+        collection.add(
+            ids=all_ids[i:end],
+            embeddings=embeddings[i:end],
+            documents=all_documents[i:end],
+            metadatas=all_metadatas[i:end],
+        )
 
     return len(chunks)
 
@@ -162,16 +216,6 @@ def query_chunks(
 ) -> list[dict]:
     """
     Retrieve the most relevant chunks for a query.
-
-    Args:
-        company: Company name.
-        query: Natural language query.
-        n_results: Number of chunks to return (default from settings).
-        section_filter: Optional section tag to filter by (e.g., "revenue").
-        period_filter: Optional period to filter by (e.g., "Q3_FY2024").
-
-    Returns:
-        List of dicts with "content", "metadata", and "relevance_score".
     """
     if n_results is None:
         n_results = settings.retrieval_top_k
@@ -204,14 +248,12 @@ def query_chunks(
             include=["documents", "metadatas", "distances"],
         )
     except Exception:
-        # Retry without filters if filter causes issues
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=min(n_results, collection.count()),
             include=["documents", "metadatas", "distances"],
         )
 
-    # Package results
     retrieved = []
     if results["ids"] and results["ids"][0]:
         for i in range(len(results["ids"][0])):
