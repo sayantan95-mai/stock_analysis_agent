@@ -9,7 +9,7 @@ from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.config.settings import settings
-from src.tools.pdf_parser import parse_pdf, classify_sections, format_table_as_text
+from src.tools.pdf_parser import parse_pdf, classify_sections
 from src.rag.vector_store import store_chunks, query_chunks
 from src.models.schemas import DocumentSummary
 
@@ -127,6 +127,8 @@ def ingest_document(
             })
 
     # Step 3: Embed and store
+    print(f"   📄 Parsed {len(parsed['text_pages'])} pages, "
+          f"{len(parsed['tables'])} tables → {len(all_chunks)} chunks")
     stored_count = store_chunks(company, all_chunks)
 
     return DocumentSummary(

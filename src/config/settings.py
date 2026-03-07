@@ -18,14 +18,16 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     embedding_model: str = "gemini-embedding-001"
-    llm_temperature: float = 0.2  # low for factual accuracy
+    llm_temperature: float = 0.2
 
     # --- Tavily (Web Search) ---
     tavily_api_key: str = ""
 
     # --- RAG Settings ---
-    chunk_size: int = 800
-    chunk_overlap: int = 100
+    # chunk_size=2000 keeps total chunks under ~400 for a 150-page PDF
+    # This is critical for free tier (1,000 RPD limit)
+    chunk_size: int = 2000
+    chunk_overlap: int = 200
     retrieval_top_k: int = 8
 
     # --- ChromaDB ---

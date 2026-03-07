@@ -3,6 +3,7 @@ PDF parser — extracts text and tables from financial documents.
 Uses PyMuPDF for text and pdfplumber for tables.
 """
 
+import re
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -48,7 +49,7 @@ def classify_sections(text: str) -> list[str]:
 
 
 # ──────────────────────────────────────────────
-# Table Formatting
+# Table Formatting & Filtering
 # ──────────────────────────────────────────────
 
 def format_table_as_text(table: list[list]) -> str:
@@ -58,6 +59,42 @@ def format_table_as_text(table: list[list]) -> str:
         cleaned = [str(cell).strip() if cell else "" for cell in row]
         rows.append(" | ".join(cleaned))
     return "\n".join(rows)
+
+
+def _is_meaningful_table(table: list[list], table_text: str) -> bool:
+    """Filter out junk tables that pdfplumber misdetects.
+
+    Annual reports are full of decorative elements, page headers/footers,
+    and tiny fragments that pdfplumber picks up as 'tables'. This function
+    ensures we only keep real financial data tables.
+
+    Criteria for a meaningful table:
+    - At least 150 characters (not a tiny header)
+    - At least 3 rows (header + 2 data rows minimum)
+    - At least 2 columns in most rows (not a single-column list)
+    - Contains at least one number (financial tables always have numbers)
+    """
+    # Too short — probably a header, caption, or label
+    if len(table_text.strip()) < 150:
+        return False
+
+    # Too few rows — not a real data table
+    if len(table) < 3:
+        return False
+
+    # Must have at least 2 non-empty columns in most rows
+    multi_col_rows = sum(
+        1 for row in table
+        if len([c for c in row if c and str(c).strip()]) >= 2
+    )
+    if multi_col_rows < 2:
+        return False
+
+    # Must contain at least one number (financial tables always have numbers)
+    if not re.search(r'\d+[.,]?\d*', table_text):
+        return False
+
+    return True
 
 
 # ──────────────────────────────────────────────
@@ -93,69 +130,39 @@ def parse_pdf(pdf_path: str | Path) -> dict:
     doc.close()
 
     # --- Table extraction via pdfplumber (better table detection) ---
+    # Track seen content to avoid near-duplicate tables
+    seen_table_hashes: set[str] = set()
+    tables_skipped = 0
+
     with pdfplumber.open(str(pdf_path)) as pdf:
         for page_num, page in enumerate(pdf.pages):
             try:
                 tables = page.extract_tables()
                 for table in tables:
                     table_text = format_table_as_text(table)
-                    if len(table_text.strip()) > 50:  # skip tiny/empty tables
-                        result["tables"].append({
-                            "page": page_num + 1,
-                            "data": table,
-                            "text": table_text,
-                        })
+
+                    # Skip junk tables (headers, tiny fragments, decorative elements)
+                    if not _is_meaningful_table(table, table_text):
+                        tables_skipped += 1
+                        continue
+
+                    # Skip near-duplicate tables (same first 200 chars)
+                    table_hash = table_text[:200].strip()
+                    if table_hash in seen_table_hashes:
+                        tables_skipped += 1
+                        continue
+                    seen_table_hashes.add(table_hash)
+
+                    result["tables"].append({
+                        "page": page_num + 1,
+                        "data": table,
+                        "text": table_text,
+                    })
             except Exception:
-                continue  # some pages may fail table extraction
+                continue
+
+    if tables_skipped > 0:
+        print(f"   🧹 Filtered out {tables_skipped} junk/duplicate tables, "
+              f"kept {len(result['tables'])} meaningful tables")
 
     return result
-
-
-def create_chunks_from_pdf(
-    pdf_path: str | Path,
-    company: str,
-    doc_type: str,
-    period: str,
-) -> list[DocumentChunk]:
-    """
-    Parse a PDF and return classified, chunked DocumentChunk objects.
-    Note: This does basic page-level chunking. The RAG pipeline
-    applies smarter splitting via langchain text splitters.
-
-    Args:
-        pdf_path: Path to the PDF.
-        company: Company name (e.g., "Reliance Industries").
-        doc_type: Document type (e.g., "annual_report", "quarterly").
-        period: Time period (e.g., "FY2024", "Q3_FY2024").
-
-    Returns:
-        List of DocumentChunk objects ready for embedding.
-    """
-    parsed = parse_pdf(pdf_path)
-    chunks: list[DocumentChunk] = []
-
-    # --- Tables as single chunks (never split) ---
-    for table_info in parsed["tables"]:
-        sections = classify_sections(table_info["text"])
-        chunks.append(DocumentChunk(
-            content=table_info["text"],
-            page=table_info["page"],
-            content_type="table",
-            sections=sections,
-            doc_type=doc_type,
-            period=period,
-        ))
-
-    # --- Text pages (will be further split by RAG pipeline) ---
-    for page_info in parsed["text_pages"]:
-        sections = classify_sections(page_info["content"])
-        chunks.append(DocumentChunk(
-            content=page_info["content"],
-            page=page_info["page"],
-            content_type="text",
-            sections=sections,
-            doc_type=doc_type,
-            period=period,
-        ))
-
-    return chunks

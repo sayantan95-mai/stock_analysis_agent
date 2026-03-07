@@ -1,5 +1,13 @@
 """
 Vector store — ChromaDB wrapper for storing and querying document embeddings.
+
+FREE TIER LIMITS (Gemini Embedding 1):
+  - RPM:  100 requests/min
+  - TPM:  30,000 tokens/min   ← THIS is the real bottleneck
+  - RPD:  1,000 requests/day  ← Hard daily cap
+
+Each text in a batch = 1 request + its tokens toward TPM.
+A batch of 25 chunks × ~500 tokens = 12,500 tokens (safely under 30K TPM).
 """
 from __future__ import annotations
 
@@ -33,19 +41,22 @@ def _get_genai() -> genai.Client:
 
 
 # ──────────────────────────────────────────────
-# Embedding
+# Embedding — Rate-Limit-Aware
 # ──────────────────────────────────────────────
 
-# Google's BatchEmbedContents API allows at most 100 items per request
-_EMBED_BATCH_LIMIT = 100
+# Batch size 25: at ~500 tokens/chunk → ~12,500 tokens/batch (under 30K TPM)
+# Also only 25 RPM used per batch (under 100 RPM)
+_EMBED_BATCH_LIMIT = 25
 
-# Rate-limit: free tier = 100 requests/min. We pause between batches.
-_BATCH_DELAY_SECONDS = 2        # small delay between every batch
-_RATE_LIMIT_MAX_RETRIES = 5     # max retries on 429 errors
+# Wait 62s between batches so RPM counter fully resets
+_BATCH_DELAY_SECONDS = 62
+
+# Max retries on 429 errors
+_RATE_LIMIT_MAX_RETRIES = 3
 
 
 def get_embedding(text: str) -> list[float]:
-    """Get embedding vector from Gemini embedding model."""
+    """Get embedding vector for a single text."""
     client = _get_genai()
     result = client.models.embed_content(
         model=settings.embedding_model,
@@ -55,7 +66,7 @@ def get_embedding(text: str) -> list[float]:
 
 
 def _embed_batch_with_retry(texts: list[str]) -> list[list[float]]:
-    """Embed a single batch (<=100 texts) with retry on rate-limit errors."""
+    """Embed a single batch with retry on rate-limit errors."""
     client = _get_genai()
 
     for attempt in range(_RATE_LIMIT_MAX_RETRIES):
@@ -68,41 +79,54 @@ def _embed_batch_with_retry(texts: list[str]) -> list[list[float]]:
 
         except Exception as e:
             error_str = str(e)
-            # Check if it's a rate-limit (429) error
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                # Exponential backoff: 30s, 60s, 120s, 120s, 120s
-                wait_time = min(30 * (2 ** attempt), 120)
+                wait_time = min(62 + 30 * attempt, 120)
                 print(f"   ⏳ Rate limited (attempt {attempt + 1}/{_RATE_LIMIT_MAX_RETRIES}). "
-                      f"Waiting {wait_time}s before retry...")
+                      f"Waiting {wait_time}s...")
                 time.sleep(wait_time)
             else:
-                raise  # Non-rate-limit error, don't retry
+                raise
 
     raise RuntimeError(
-        f"Embedding failed after {_RATE_LIMIT_MAX_RETRIES} retries due to rate limiting. "
-        f"Try uploading fewer/smaller documents, or upgrade your Gemini API plan."
+        f"Embedding failed after {_RATE_LIMIT_MAX_RETRIES} retries. "
+        f"You've likely hit the DAILY quota (1,000 requests/day on free tier). "
+        f"Wait until tomorrow, or set up billing at https://aistudio.google.com "
+        f"for higher limits."
     )
 
 
 def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Batch embed multiple texts, respecting the 100-per-request API limit
-    and handling rate-limit (429) errors with automatic retry."""
+    """Batch embed texts with rate-limit awareness for free tier."""
+    total = len(texts)
     all_embeddings: list[list[float]] = []
-    total_batches = (len(texts) + _EMBED_BATCH_LIMIT - 1) // _EMBED_BATCH_LIMIT
+    total_batches = (total + _EMBED_BATCH_LIMIT - 1) // _EMBED_BATCH_LIMIT
 
-    for batch_num, i in enumerate(range(0, len(texts), _EMBED_BATCH_LIMIT), 1):
+    print(f"   📊 Total: {total} chunks → {total_batches} batch(es) of ≤{_EMBED_BATCH_LIMIT}")
+
+    # Warn about daily quota usage
+    print(f"   💡 Daily quota usage: ~{total} of 1,000 RPD (free tier)")
+    if total > 800:
+        print(f"   ⚠️  WARNING: This will use {total}/1000 of your daily quota!")
+
+    if total_batches > 1:
+        est_minutes = (total_batches - 1) * _BATCH_DELAY_SECONDS / 60
+        print(f"   ⏱️  Estimated time: ~{est_minutes:.0f} min")
+
+    for batch_num, i in enumerate(range(0, total, _EMBED_BATCH_LIMIT), 1):
         batch = texts[i : i + _EMBED_BATCH_LIMIT]
 
-        if total_batches > 1:
-            print(f"   📦 Embedding batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
+        print(f"   📦 Batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
 
         embeddings = _embed_batch_with_retry(batch)
         all_embeddings.extend(embeddings)
 
-        # Small delay between batches to stay under rate limits
         if batch_num < total_batches:
+            remaining = total_batches - batch_num
+            print(f"   ⏳ Waiting {_BATCH_DELAY_SECONDS}s for quota reset "
+                  f"({remaining} batch(es) left)...")
             time.sleep(_BATCH_DELAY_SECONDS)
 
+    print(f"   ✅ All {total} chunks embedded successfully!")
     return all_embeddings
 
 
@@ -111,9 +135,7 @@ def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
 # ──────────────────────────────────────────────
 
 def _collection_name(company: str) -> str:
-    """Sanitize company name into a valid ChromaDB collection name.
-    Rules: 3-63 chars, [a-zA-Z0-9._-], must start and end with alphanumeric.
-    """
+    """Sanitize company name into a valid ChromaDB collection name."""
     name = company.lower().strip()
     name = name.replace(" ", "-").replace("&", "and")
     name = "".join(c for c in name if c.isalnum() or c in "._-")
@@ -124,7 +146,6 @@ def _collection_name(company: str) -> str:
 
 
 def get_or_create_collection(company: str) -> chromadb.Collection:
-    """Get or create a ChromaDB collection for a company."""
     chroma = _get_chroma()
     return chroma.get_or_create_collection(
         name=_collection_name(company),
@@ -133,7 +154,6 @@ def get_or_create_collection(company: str) -> chromadb.Collection:
 
 
 def delete_collection(company: str) -> None:
-    """Delete all stored data for a company."""
     chroma = _get_chroma()
     name = _collection_name(company)
     try:
@@ -149,23 +169,10 @@ def delete_collection(company: str) -> None:
 _CHROMA_BATCH_LIMIT = 100
 
 
-def store_chunks(
-    company: str,
-    chunks: list[dict],
-) -> int:
-    """
-    Embed and store document chunks in ChromaDB.
-
-    Args:
-        company: Company name.
-        chunks: List of dicts with "content" and "metadata" keys.
-
-    Returns:
-        Number of chunks stored.
-    """
+def store_chunks(company: str, chunks: list[dict]) -> int:
+    """Embed and store document chunks in ChromaDB."""
     collection = get_or_create_collection(company)
 
-    # Batch embed all chunks (handles >100 and rate limits internally)
     texts = [c["content"] for c in chunks]
     embeddings = get_embeddings_batch(texts)
 
@@ -181,7 +188,6 @@ def store_chunks(
         all_ids.append(f"{base_id}_{idx}")
         all_documents.append(chunk["content"])
 
-        # Flatten metadata — ChromaDB only supports str/int/float/bool
         meta = {}
         for k, v in chunk.get("metadata", {}).items():
             if isinstance(v, list):
@@ -190,7 +196,6 @@ def store_chunks(
                 meta[k] = v
         all_metadatas.append(meta)
 
-    # Add to ChromaDB in batches
     for i in range(0, len(all_ids), _CHROMA_BATCH_LIMIT):
         end = i + _CHROMA_BATCH_LIMIT
         collection.add(
@@ -214,9 +219,6 @@ def query_chunks(
     section_filter: str | None = None,
     period_filter: str | None = None,
 ) -> list[dict]:
-    """
-    Retrieve the most relevant chunks for a query.
-    """
     if n_results is None:
         n_results = settings.retrieval_top_k
 
@@ -227,7 +229,6 @@ def query_chunks(
 
     query_embedding = get_embedding(query)
 
-    # Build where filter
     where_filter = None
     conditions = []
     if section_filter:
