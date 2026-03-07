@@ -1,7 +1,7 @@
 # 📈 Stock Analysis Multi-Agent System
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Python-3.12+-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Google%20ADK-Gemini-orange?style=for-the-badge&logo=google&logoColor=white" alt="Google ADK">
   <img src="https://img.shields.io/badge/Streamlit-UI-red?style=for-the-badge&logo=streamlit&logoColor=white" alt="Streamlit">
   <img src="https://img.shields.io/badge/ChromaDB-Vector%20Store-green?style=for-the-badge" alt="ChromaDB">
@@ -91,7 +91,7 @@ Simply enter a company name, upload financial documents (annual reports, quarter
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - [uv](https://github.com/astral-sh/uv) (recommended) or pip
 - Google AI API key ([Get one here](https://aistudio.google.com/apikey))
 
@@ -150,17 +150,37 @@ The app will open at `http://localhost:8501`
 
 ---
 
+## ⚠️ Free Tier Rate Limits
+
+This project works with Google's **free tier** Gemini API, which has the following limits:
+
+| Resource | Limit | Impact |
+|----------|-------|--------|
+| **Gemini 2.5 Flash RPM** | 5 req/min | ~4 LLM calls per analysis run |
+| **Gemini 2.5 Flash RPD** | 20 req/day | ~5 full analyses per day |
+| **Embedding RPM** | 100 req/min | Batches of 25 with 62s delays |
+| **Embedding TPM** | 30K tokens/min | Limits batch size to ~25 chunks |
+| **Embedding RPD** | 1,000 req/day | ~300-400 chunks per PDF (1-2 large PDFs/day) |
+
+**Tips for free tier:**
+- Upload **one PDF at a time** (~300 chunks = 300 of 1,000 daily requests)
+- A 150-page annual report takes **~10-12 minutes** to ingest
+- Start without PDFs to test the basic analysis flow first
+- Set up [billing](https://aistudio.google.com) for significantly higher limits
+
+---
+
 ## 🛠 Tech Stack
 
 | Component | Technology |
 |-----------|------------|
 | **AI Framework** | Google ADK (Agent Development Kit) |
-| **LLM** | Google Gemini 2.0 Flash |
+| **LLM** | Google Gemini 2.5 Flash |
 | **Vector Database** | ChromaDB |
-| **Embeddings** | Google text-embedding-004 |
-| **PDF Processing** | PyMuPDF (fitz) |
+| **Embeddings** | Google Gemini Embedding 001 |
+| **PDF Processing** | PyMuPDF (fitz) + pdfplumber |
 | **Stock Data** | yfinance |
-| **Web Search** | Tavily API |
+| **Web Search** | Tavily API + DuckDuckGo (fallback) |
 | **UI** | Streamlit |
 | **Package Manager** | uv |
 
@@ -178,18 +198,24 @@ stock-analysis-agent/
 │   │   ├── analysis_agent.py
 │   │   └── advisor_agent.py
 │   ├── rag/              # RAG pipeline components
-│   │   ├── pdf_parser.py
-│   │   ├── chunker.py
 │   │   ├── vector_store.py
 │   │   └── pipeline.py
 │   ├── tools/            # Agent tools
 │   │   ├── stock_data.py
-│   │   └── web_search.py
+│   │   ├── web_search.py
+│   │   └── pdf_parser.py
+│   ├── models/
+│   │   └── schemas.py    # Pydantic data models
+│   ├── config/
+│   │   └── settings.py   # App configuration
 │   └── ui/
 │       └── app.py        # Streamlit interface
 ├── data/
-│   └── chroma_db/        # Vector store persistence
+│   ├── uploads/          # Uploaded PDFs
+│   └── cache/            # ChromaDB + search/market data cache
+├── tests/
 ├── pyproject.toml
+├── requirements.txt
 ├── .env.example
 └── README.md
 ```
@@ -204,6 +230,16 @@ Create a `.env` file in the project root:
 GOOGLE_API_KEY=your_google_api_key_here
 TAVILY_API_KEY=your_tavily_api_key_here  # Optional: for web search
 ```
+
+Key settings in `src/config/settings.py`:
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `gemini_model` | `gemini-2.5-flash` | LLM for analysis and advice |
+| `embedding_model` | `gemini-embedding-001` | Embedding model for RAG |
+| `chunk_size` | `2000` | Text chunk size (larger = fewer API calls) |
+| `chunk_overlap` | `200` | Overlap between chunks |
+| `retrieval_top_k` | `8` | Number of chunks retrieved per query |
 
 ---
 
